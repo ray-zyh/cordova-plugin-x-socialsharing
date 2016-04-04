@@ -36,6 +36,7 @@ public class SocialSharing extends CordovaPlugin {
 
   private static final String ACTION_AVAILABLE_EVENT = "available";
   private static final String ACTION_SHARE_EVENT = "share";
+  //private static final String ACTION_SHARE_EVENT = "sharefile";
   private static final String ACTION_CAN_SHARE_VIA = "canShareVia";
   private static final String ACTION_CAN_SHARE_VIA_EMAIL = "canShareViaEmail";
   private static final String ACTION_SHARE_VIA = "shareVia";
@@ -73,7 +74,7 @@ public class SocialSharing extends CordovaPlugin {
     } else if (ACTION_SHARE_EVENT.equals(action)) {
       return doSendIntent(callbackContext, args.getString(0), args.getString(1), args.getJSONArray(2), args.getString(3), null, false);
     } else if (ACTION_SHARE_VIA_TWITTER_EVENT.equals(action)) {
-      return doSendIntent(callbackContext, args.getString(0), args.getString(1), args.getJSONArray(2), args.getString(3), "twitter", false);
+      return doSendIntent2(callbackContext, args.getString(0), args.getString(1), args.getJSONArray(2), args.getString(3), null, false);
     } else if (ACTION_SHARE_VIA_FACEBOOK_EVENT.equals(action)) {
       return doSendIntent(callbackContext, args.getString(0), args.getString(1), args.getJSONArray(2), args.getString(3), "com.facebook.katana", false);
     } else if (ACTION_SHARE_VIA_FACEBOOK_WITH_PASTEMESSAGEHINT.equals(action)) {
@@ -195,6 +196,128 @@ public class SocialSharing extends CordovaPlugin {
   }
 
   private boolean doSendIntent(final CallbackContext callbackContext, final String msg, final String subject, final JSONArray files, final String url, final String appPackageName, final boolean peek) {
+
+    final CordovaInterface mycordova = cordova;
+    final CordovaPlugin plugin = this;
+
+    cordova.getThreadPool().execute(new SocialSharingRunnable(callbackContext) {
+      public void run() {
+        String message = msg;
+        final boolean hasMultipleAttachments = files.length() > 1;
+        final Intent sendIntent = new Intent(hasMultipleAttachments ? Intent.ACTION_SEND_MULTIPLE : Intent.ACTION_SEND);
+        sendIntent.addFlags(Intent.FLAG_ACTIVITY_CLEAR_WHEN_TASK_RESET);
+
+        try {
+          if (files.length() > 0 && !"".equals(files.getString(0))) {
+            final String dir = getDownloadDir();
+            if (dir != null) {
+              ArrayList<Uri> fileUris = new ArrayList<Uri>();
+              Uri fileUri = null;
+              for (int i = 0; i < files.length(); i++) {
+                fileUri = getFileUriAndSetType(sendIntent, dir, files.getString(i), subject, i);
+                if (fileUri != null) {
+                  fileUris.add(fileUri);
+                }
+              }
+              if (!fileUris.isEmpty()) {
+                if (hasMultipleAttachments) {
+                  sendIntent.putExtra(Intent.EXTRA_STREAM, fileUris);
+                } else {
+                  sendIntent.putExtra(Intent.EXTRA_STREAM, fileUri);
+                }
+              }
+            } else {
+              sendIntent.setType("text/plain");
+            }
+          } else {
+            sendIntent.setType("text/plain");
+          }
+        } catch (Exception e) {
+          callbackContext.error(e.getMessage());
+        }
+
+        if (notEmpty(subject)) {
+          sendIntent.putExtra(Intent.EXTRA_SUBJECT, subject);
+        }
+
+        // add the URL to the message, as there seems to be no separate field
+        if (notEmpty(url)) {
+          if (notEmpty(message)) {
+            message += " " + url;
+          } else {
+            message = url;
+          }
+        }
+        if (notEmpty(message)) {
+          sendIntent.putExtra(android.content.Intent.EXTRA_TEXT, message);
+          // sometimes required when the user picks share via sms
+          if (Build.VERSION.SDK_INT < 21) { // LOLLIPOP
+            sendIntent.putExtra("sms_body", message);
+          }
+        }
+
+        // this was added to start the intent in a new window as suggested in #300 to prevent crashes upon return
+        sendIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+        if (appPackageName != null) {
+          String packageName = appPackageName;
+          String passedActivityName = null;
+          if (packageName.contains("/")) {
+            String[] items = appPackageName.split("/");
+            packageName = items[0];
+            passedActivityName = items[1];
+          }
+          final ActivityInfo activity = getActivity(callbackContext, sendIntent, packageName);
+          if (activity != null) {
+            if (peek) {
+              callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.OK));
+            } else {
+              sendIntent.addCategory(Intent.CATEGORY_LAUNCHER);
+              sendIntent.setComponent(new ComponentName(activity.applicationInfo.packageName,
+                  passedActivityName != null ? passedActivityName : activity.name));
+
+              // as an experiment for #300 we're explicitly running it on the ui thread here
+              cordova.getActivity().runOnUiThread(new Runnable() {
+                public void run() {
+                  mycordova.startActivityForResult(plugin, sendIntent, 0);
+                }
+              });
+
+              if (pasteMessage != null) {
+                // add a little delay because target app (facebook only atm) needs to be started first
+                new Timer().schedule(new TimerTask() {
+                  public void run() {
+                    cordova.getActivity().runOnUiThread(new Runnable() {
+                      public void run() {
+                        copyHintToClipboard(msg, pasteMessage);
+                        showPasteMessage(pasteMessage);
+                      }
+                    });
+                  }
+                }, 2000);
+              }
+            }
+          }
+        } else {
+          if (peek) {
+            callbackContext.sendPluginResult(new PluginResult(PluginResult.Status.OK));
+          } else {
+            // experimenting a bit
+            // as an experiment for #300 we're explicitly running it on the ui thread here
+            cordova.getActivity().runOnUiThread(new Runnable() {
+              public void run() {
+                mycordova.startActivityForResult(plugin, Intent.createChooser(sendIntent, null), ACTIVITY_CODE_SEND);
+              }
+            });
+        }
+      }
+      }
+    });
+    return true;
+  }
+
+
+  private boolean doSendIntent2(final CallbackContext callbackContext, final String msg, final String subject, final JSONArray files, final String url, final String appPackageName, final boolean peek) {
 
     final CordovaInterface mycordova = cordova;
     final CordovaPlugin plugin = this;
